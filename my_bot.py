@@ -1,6 +1,9 @@
 import os
 import asyncio
 import yt_dlp
+import http.server
+import socketserver
+import threading
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -15,26 +18,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
     
-    # চেক করা হচ্ছে এটি আসলেই একটি লিংক কিনা
     if not (url.startswith("http://") or url.startswith("https://")):
         await update.message.reply_text("⚠️ দয়া করে শুধু সঠিক ভিডিওর লিংক পাঠান।")
         return
 
     await update.message.reply_text("⏳ ভিডিও ডাউনলোড হচ্ছে... একটু অপেক্ষা করুন।")
 
-    # সর্বোচ্চ রেজোলিউশনের ভিডিও এবং অডিও ডাউনলোড করে mp4 ফরম্যাটে মার্জ করার সেটিংস
+    # Render Environment Variable থেকে কুকিজ নেওয়া হচ্ছে
+    cookies_content = os.environ.get("YTDLP_COOKIES")
+    
     ydl_opts = {
-        'format': 'bestvideo+bestaudio/best', 
+        'format': 'bestvideo+bestaudio/best',
         'merge_output_format': 'mp4',
         'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
         'noplaylist': True,
-        'quiet': True
+        'quiet': True,
+        'nocheckcertificate': True
     }
+
+    # যদি Environment Variable-এ কুকিজ থাকে, তবে সেটি যোগ করা হচ্ছে
+    if cookies_content:
+        ydl_opts['http_headers'] = {'Cookie': cookies_content}
 
     try:
         loop = asyncio.get_event_loop()
         
-        # ডাউনলোড ফাংশন (আলাদা থ্রেডে চালানো হবে যাতে বট হ্যাং না করে)
         def download():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -45,26 +53,31 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         filepath = await loop.run_in_executor(None, download)
 
-        # টেলিগ্রামের ৫০ MB লিমিট চেক করা
+        # টেলিগ্রামের ৫০ MB লিমিট চেক
         if os.path.getsize(filepath) > 50 * 1024 * 1024:
-            await update.message.reply_text("❌ দুঃখিত, ভিডিওটির সাইজ ৫০ MB এর বেশি, যা টেলিগ্রাম বটে পাঠানো সম্ভব নয়।")
-            os.remove(filepath) # বড় ফাইল ডিলিট করে দেওয়া
+            await update.message.reply_text("❌ দুঃখিত, ভিডিওটির সাইজ ৫০ MB এর বেশি।")
+            os.remove(filepath)
             return
 
-        # ভিডিও পাঠানো
         await update.message.reply_video(video=open(filepath, 'rb'), supports_streaming=True)
-        
-        # পাঠানো শেষে ফাইলটি ডিলিট করে দেওয়া
         os.remove(filepath)
         
     except Exception as e:
-        await update.message.reply_text("❌ ডাউনলোড করা সম্ভব হয়নি। লিংকটি সঠিক কিনা অথবা সার্ভারে FFmpeg ইনস্টল আছে কিনা চেক করুন।")
+        print(f"Error: {e}")
+        await update.message.reply_text(f"❌ ডাউনলোড করা সম্ভব হয়নি। এরর: {str(e)[:100]}")
 
 def main():
+    # ১. Render-এর পোর্ট স্ক্যান টাইমআউট এড়াতে ডামি ওয়েব সার্ভার
+    port = int(os.environ.get("PORT", 10000))
+    handler = http.server.SimpleHTTPRequestHandler
+    httpd = socketserver.TCPServer(("0.0.0.0", port), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    print(f"ডামি ওয়েব সার্ভার পোর্ট {port}-এ চালু হয়েছে।")
+
+    # ২. টেলিগ্রাম বট চালু করা
     print("বট চালু হচ্ছে...")
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    # শুধুমাত্র টেক্সট মেসেজ (লিংক) ফিল্টার করা হচ্ছে
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     app.run_polling()
 
